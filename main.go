@@ -29,8 +29,12 @@ func load_data() ([]int, [][]float64) {
 		return nil, nil
 	}
 
-	// Převedeme data na string a rozdělíme na řádky
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Převedeme data na string, normalizujeme konce řádků a rozdělíme na řádky
+	content := strings.TrimSpace(string(data))
+	// Normalizovat Windows/Mac/*nix konce řádků na '\n'
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	lines := strings.Split(content, "\n")
 
 	// Řádek 1 obsahuje jen jedno číslo a pak newline character
 	// Nelze použít numberOfItems = int(lines[0]) protože int() konvertuje pouze numerické typy, ne stringy
@@ -102,8 +106,6 @@ func load_data() ([]int, [][]float64) {
 }
 
 func main() {
-	fmt.Println("Hello, World!")
-
 	// načteme data a logneme je abychom si ověřili, že se načetla správně
 	widths, matrix := load_data()
 	fmt.Println("Widths:", widths)
