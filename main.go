@@ -6,8 +6,31 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
+// Globální proměnné - minimální synchronizace
+var (
+	// bestCost - atomická proměnná pro nejlepší cenu (používáme uint64 pro atomic operace s float64)
+	bestCost uint64
+	// bestPermutation - mutex chráněná
+	bestPermutation []int
+	// Mutex (Mutual Exclusion) pro ochranu bestPermutation
+	// Je to vlastně obdoba zámku (lock)
+	// Když jedna goroutine drží mutex, ostatní musí čekat, až ho uvolní
+	bestMutex sync.Mutex
+	// Statistiky
+	// Proč atomic.Int64 - Go 1.19+ podporuje atomic typy přímo
+	// Je to hardware atomic typ - používá hardware atomické instrukce
+	// To znamená, že je garantováno, že operace proběhne celá bez přerušení - menší šance deadlocku
+	// Je dobré to používat, když máme více goroutines a chceme minimalizovat zámky (mutexy)
+	totalVisited atomic.Int64
+	totalPruned  atomic.Int64
+)
+
+// load_data načte data ze souboru Y-t_10.txt
+// Vrací: pole šířek zařízení a matici vah přechodů mezi zařízeními
 func load_data() ([]int, [][]float64) {
 	// Uložíme si cestu k souboru do proměnné
 	var path string = "Y-t_10.txt"
@@ -49,7 +72,7 @@ func load_data() ([]int, [][]float64) {
 	// Funkce Split - jako první argument bere string, který chceme rozdělit, jako druhý argument bere oddělovač
 	// Funkce TrimSpace odstraní whitespace znaky (jako jsou newlines) z začátku a konce stringu
 	widthStrings := strings.Split(strings.TrimSpace(lines[1]), " ")
-	
+
 	// Takže teď máme ve widthStrings pole stringů, které musíme převést na pole intů:
 	for _, wstr := range widthStrings { // Pro každý string v poli widthStrings: (první je _, protože index nepotřebujeme)
 		w, err := strconv.Atoi(wstr) // Atoi je ekvivalent ParseInt pro převod stringu na int
@@ -57,10 +80,10 @@ func load_data() ([]int, [][]float64) {
 			fmt.Println("Error:", err)
 			return nil, nil
 		}
-		
+
 		widths = append(widths, w) // Do pole widths přidáme převedené číslo
 	}
-	
+
 	// Teď máme ve widths pole intů obsahující šířky zařízení, widthStrings je už nepotřebné - takže ho můžeme "smazat"
 	widthStrings = nil
 
@@ -81,6 +104,7 @@ func load_data() ([]int, [][]float64) {
 		// Pro každou část:
 		for _, part := range parts {
 			// Převedeme string na float
+			// ParseFloat vrací float64 (64-bitový float) - druhý parametr 64 specifikuje přesnost
 			value, err := strconv.ParseFloat(part, 64)
 			if err != nil {
 				fmt.Println("Error:", err)
@@ -93,11 +117,12 @@ func load_data() ([]int, [][]float64) {
 		matrix = append(matrix, row)
 	}
 
-	// Důležité: Doplnění dolní části matice (Dataset dolní část pod diagonálou má hodnotu 0)
-	// Matice musí být symetrická
+	// DŮLEŽITÉ: Doplnění dolní části matice (Dataset dolní část pod diagonálou má hodnotu 0)
+	// Matice musí být symetrická - c_ij = c_ji
 	n := len(matrix)
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
+			// Zkopírujeme hodnotu z horní části (nad diagonálou) do dolní části (pod diagonálou)
 			matrix[j][i] = matrix[i][j]
 		}
 	}
@@ -105,12 +130,51 @@ func load_data() ([]int, [][]float64) {
 	return widths, matrix
 }
 
+// calculate_distance vypočítá vzdálenost mezi dvěma pozicemi v permutaci
+// Vzorec: d(π_i, π_j) = (l_πi + l_πj)/2 + Σ(l_πk) pro i < k < j
+// Parametry:
+//   - permutation: aktuální uspořádání zařízení
+//   - widths: šířky jednotlivých zařízení
+//   - i: index první pozice v permutaci
+//   - j: index druhé pozice v permutaci
+//
+// Vrací: vzdálenost mezi pozicemi i a j
+func calculate_distance(permutation []int, widths []int, i int, j int) float64 {
+	// Zjistíme, která zařízení jsou na pozicích i a j
+	// permutation[i] je INDEX zařízení (0-9), ne jeho pozice
+	facilityI := permutation[i]
+	facilityJ := permutation[j]
+
+	// První část vzorce: polovina šířky obou krajních zařízení
+	// Toto reprezentuje vzdálenost od středu prvního zařízení k jeho kraji
+	// a od kraje druhého zařízení k jeho středu
+	distance := float64(widths[facilityI]+widths[facilityJ]) / 2.0
+
+	// Druhá část vzorce: suma šířek všech zařízení MEZI pozicemi i a j
+	// Procházíme všechny pozice k, kde i < k < j
+	// range(i+1, j) v Pythonu odpovídá for k := i + 1; k < j; k++ v Go
+	for k := i + 1; k < j; k++ {
+		// Zjistíme, které zařízení je na pozici k
+		facilityK := permutation[k]
+		// Přičteme jeho šířku k celkové vzdálenosti
+		distance += float64(widths[facilityK])
+	}
+
+	return distance
+}
+
 func main() {
-	// načteme data a logneme je abychom si ověřili, že se načetla správně
-	widths, matrix := load_data()
+	// Načteme data ze souboru
+	widths, costMatrix := load_data()
+	if widths == nil || costMatrix == nil {
+		fmt.Println("Failed to load data.")
+		return
+	}
+
+	// Výpis načtených dat pro kontrolu
 	fmt.Println("Widths:", widths)
-	fmt.Println("Matrix:")
-	for _, row := range matrix {
+	fmt.Println("Cost Matrix:")
+	for _, row := range costMatrix {
 		fmt.Println(row)
 	}
 }
