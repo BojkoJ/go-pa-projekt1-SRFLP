@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Globální proměnné - minimální synchronizace
@@ -196,19 +199,270 @@ func calculateCostIncrement(perm []int, depth int, newFacility int,
 	return costIncrement
 }
 
-func main() {
-	// Načteme data
-	widths, costMatrix := load_data()
-	if widths == nil || costMatrix == nil {
-		fmt.Println("Failed to load data.")
+// atomicLoadFloat64 načte float64 hodnotu atomicky
+func atomicLoadFloat64(addr *uint64) float64 {
+	return math.Float64frombits(atomic.LoadUint64(addr))
+}
+
+// atomicStoreFloat64 uloží float64 hodnotu atomicky
+func atomicStoreFloat64(addr *uint64, val float64) {
+	atomic.StoreUint64(addr, math.Float64bits(val))
+}
+
+// branchAndBound implementuje algoritmus Branch and Bound (backtracking)
+// ULTRA-OPTIMALIZOVANÁ verze
+func branchAndBound(perm []int, used uint16, depth int, currentCost float64,
+	widths []int, costMatrix [][]float64, n int,
+	localBest *float64, visited, pruned *int64) {
+
+	*visited++
+
+	// BOUND - rychlý check
+	if currentCost >= *localBest {
+		*pruned++
 		return
 	}
 
-	// výpis dat
-	fmt.Println("Widths:", widths)
-	fmt.Println("Cost Matrix:")
-	for _, row := range costMatrix {
-		fmt.Println(row)
+	// Kompletní permutace
+	if depth == n {
+		// Pokud jsme lepší, update atomicky
+		for {
+			current := atomicLoadFloat64(&bestCost)
+			if currentCost >= current {
+				break
+			}
+			if atomic.CompareAndSwapUint64(&bestCost,
+				math.Float64bits(current),
+				math.Float64bits(currentCost)) {
+				*localBest = currentCost
+				bestMutex.Lock()
+				bestPermutation = make([]int, n)
+				copy(bestPermutation, perm[:n])
+				bestMutex.Unlock()
+				// Odstraněn fmt.Printf - zpomaluje výkon!
+				break
+			}
+		}
+		return
 	}
 
+	// Občas refresh (bitwise AND je rychlejší než modulo)
+	if *visited&0xFFF == 0 { // každých 4096 uzlů (méně často = rychlejší)
+		global := atomicLoadFloat64(&bestCost)
+		if global < *localBest {
+			*localBest = global
+		}
+	}
+
+	// BRANCH - zkusíme všechna dosud nepoužitá zařízení
+	for facility := 0; facility < n; facility++ {
+		// Rychlý check bitmapy - je toto zařízení už použité?
+		if used&(1<<facility) != 0 {
+			continue
+		}
+
+		// Vypočítáme přírůstek ceny při přidání tohoto zařízení
+		// Používáme optimalizovanou funkci - O(depth) místo O(depth²)
+		costIncrement := calculateCostIncrement(perm, depth, facility, widths, costMatrix)
+		newCost := currentCost + costIncrement
+
+		// Pruning před rekurzí
+		if newCost >= *localBest {
+			*pruned++
+			continue
+		}
+
+		// In-place update
+		perm[depth] = facility
+
+		// Rekurze
+		branchAndBound(perm, used|(1<<facility), depth+1, newCost,
+			widths, costMatrix, n, localBest, visited, pruned)
+	}
+}
+
+func main() {
+	// Spustíme měření času
+	startTime := time.Now()
+
+	fmt.Println("=== SRFLP Solver s Branch and Bound ===")
+	fmt.Println()
+
+	// Načteme data ze souboru
+	fmt.Println("Načítám data ze souboru Y-t_10.txt...")
+	widths, matrix := load_data()
+
+	// Ověříme, že se data načetla správně
+	if widths == nil || matrix == nil {
+		fmt.Println("Chyba při načítání dat!")
+		return
+	}
+
+	n := len(widths)
+	fmt.Printf("Počet zařízení: %d\n", n)
+	fmt.Printf("Šířky zařízení: %v\n", widths)
+	fmt.Println()
+
+	fmt.Println("Spouštím Branch and Bound algoritmus...")
+	fmt.Println("(Paralelní výpočet - optimalizováno pro rychlost)")
+	fmt.Println()
+
+	// Inicializace
+	// OPTIMALIZACE: Nejprve najdeme greedy řešení jako počáteční upper bound
+	// Toto dramaticky zvýší pruning hned od začátku!
+
+	// Spočítáme celkovou váhu každého zařízení (součet všech costs)
+	type facilityWeight struct {
+		id     int
+		weight float64
+	}
+	facilities := make([]facilityWeight, n)
+	for i := 0; i < n; i++ {
+		weight := 0.0
+		for j := 0; j < n; j++ {
+			if i != j {
+				weight += matrix[i][j]
+			}
+		}
+		facilities[i] = facilityWeight{id: i, weight: weight}
+	}
+
+	// Seřadíme podle váhy (nejvyšší první)
+	sort.Slice(facilities, func(i, j int) bool {
+		return facilities[i].weight > facilities[j].weight
+	})
+
+	greedyPerm := make([]int, n)
+	greedyUsed := make([]bool, n)
+	greedyPerm[0] = facilities[0].id // Začneme s nejvyšší váhou
+	greedyUsed[greedyPerm[0]] = true
+	greedyCost := 0.0
+
+	// Greedy: vždy přidáme zařízení s nejnižším přírůstkem
+	for depth := 1; depth < n; depth++ {
+		bestFacility := -1
+		bestIncrement := math.Inf(1)
+
+		for _, fw := range facilities {
+			if greedyUsed[fw.id] {
+				continue
+			}
+
+			// Spočítáme přírůstek pomocí modifikovaného vzorce (i ≤ k ≤ j)
+			increment := 0.0
+			for i := 0; i < depth; i++ {
+				facilityI := greedyPerm[i]
+				// První část: (l_i + l_new) / 2
+				distance := float64(widths[facilityI]+widths[fw.id]) / 2.0
+				// Druhá část: suma VŠECH šířek včetně krajních (i ≤ k ≤ depth)
+				for k := i; k <= depth; k++ {
+					if k < depth {
+						distance += float64(widths[greedyPerm[k]])
+					} else {
+						distance += float64(widths[fw.id])
+					}
+				}
+				increment += matrix[facilityI][fw.id] * distance
+			}
+
+			if increment < bestIncrement {
+				bestIncrement = increment
+				bestFacility = fw.id
+			}
+		}
+
+		greedyPerm[depth] = bestFacility
+		greedyUsed[bestFacility] = true
+		greedyCost += bestIncrement
+	}
+
+	// Nastavíme greedy řešení jako počáteční upper bound
+	atomicStoreFloat64(&bestCost, greedyCost)
+	bestPermutation = make([]int, n)
+	copy(bestPermutation, greedyPerm)
+	fmt.Printf("Greedy iniciální řešení: cena = %.0f, permutace = %v\n", greedyCost, greedyPerm)
+
+	totalVisited.Store(0)
+	totalPruned.Store(0)
+
+	// PARALELIZACE - každé vlákno má své lokální počítadla
+	var wg sync.WaitGroup
+
+	// Kanál pro agregaci lokálních statistik
+	type stats struct {
+		visited int64
+		pruned  int64
+	}
+	statsChan := make(chan stats, n)
+
+	// Spustíme n goroutines - každá začne s jiným zařízením jako první pozici
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+
+		go func(startIdx int) {
+			defer wg.Done()
+
+			start := facilities[startIdx].id // Použijeme seřazené ID z greedy
+
+			// Lokální proměnné - žádná synchronizace!
+			localBest := math.Inf(1)
+			var visited, pruned int64
+
+			// Buffer pro permutaci (pre-alokovaný)
+			perm := make([]int, n)
+			perm[0] = start
+			used := uint16(1 << start)
+
+			// Spustíme backtracking
+			branchAndBound(perm, used, 1, 0.0, widths, matrix, n,
+				&localBest, &visited, &pruned)
+
+			// Na konci pošleme statistiky
+			statsChan <- stats{visited, pruned}
+		}(i)
+	} // Počkáme na všechny goroutines
+	wg.Wait()
+	close(statsChan)
+
+	// Agregujeme statistiky
+	for s := range statsChan {
+		totalVisited.Add(s.visited)
+		totalPruned.Add(s.pruned)
+	}
+
+	// Výpočet skončil, zastavíme měření času
+	elapsed := time.Since(startTime)
+
+	// Vypíšeme výsledky
+	fmt.Println()
+	fmt.Println("=== VÝSLEDKY ===")
+	finalCost := atomicLoadFloat64(&bestCost)
+	fmt.Printf("Nejlepší nalezená cena: %.0f\n", finalCost)
+	fmt.Printf("Nejlepší permutace: %v\n", bestPermutation)
+	fmt.Println()
+
+	// Pro lepší čitelnost přidáme i permutaci s indexy od 1
+	permutationPlusOne := make([]int, len(bestPermutation))
+	for i, v := range bestPermutation {
+		permutationPlusOne[i] = v + 1
+	}
+	fmt.Printf("Permutace (indexy 1-%d): %v\n", n, permutationPlusOne)
+	fmt.Println()
+
+	// Statistiky
+	fmt.Println("=== STATISTIKY ===")
+	fmt.Printf("Čas výpočtu: %v\n", elapsed)
+	fmt.Printf("Navštívených uzlů: %d\n", totalVisited.Load())
+	fmt.Printf("Ořezaných větví: %d\n", totalPruned.Load())
+	fmt.Printf("Počet goroutines: %d\n", n)
+	fmt.Println()
+
+	// Ověření správnosti
+	fmt.Println("=== OVĚŘENÍ ===")
+	expectedCost := 5596.0
+	if math.Abs(finalCost-expectedCost) < 0.01 {
+		fmt.Println("✓ Výsledek je SPRÁVNÝ! Nalezena optimální cena 5596.")
+	} else {
+		fmt.Printf("✗ Pozor! Očekávaná cena je %.0f, ale nalezli jsme %.0f\n", expectedCost, finalCost)
+	}
 }
