@@ -457,12 +457,4 @@ func main() {
 	fmt.Printf("Počet goroutines: %d\n", n)
 	fmt.Println()
 
-	// Ověření správnosti
-	fmt.Println("=== OVĚŘENÍ ===")
-	expectedCost := 5596.0
-	if math.Abs(finalCost-expectedCost) < 0.01 {
-		fmt.Println("✓ Výsledek je SPRÁVNÝ! Nalezena optimální cena 5596.")
-	} else {
-		fmt.Printf("✗ Pozor! Očekávaná cena je %.0f, ale nalezli jsme %.0f\n", expectedCost, finalCost)
-	}
 }
