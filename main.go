@@ -131,7 +131,8 @@ func load_data() ([]int, [][]float64) {
 }
 
 // calculate_distance vypočítá vzdálenost mezi dvěma pozicemi v permutaci
-// Vzorec: d(π_i, π_j) = (l_πi + l_πj)/2 + Σ(l_πk) pro i < k < j
+// Vzorec POZMĚNĚNÝ DLE ZADÁNÍ: d(π_i, π_j) = (l_πi + l_πj)/2 + Σ(l_πk) pro i ≤ k ≤ j
+// POZOR: Toto je modifikovaný vzorec! Standardní SRFLP používá i < k < j
 // Parametry:
 //   - permutation: aktuální uspořádání zařízení
 //   - widths: šířky jednotlivých zařízení
@@ -146,15 +147,13 @@ func calculate_distance(permutation []int, widths []int, i int, j int) float64 {
 	facilityJ := permutation[j]
 
 	// První část vzorce: polovina šířky obou krajních zařízení
-	// Toto reprezentuje vzdálenost od středu prvního zařízení k jeho kraji
-	// a od kraje druhého zařízení k jeho středu
+	// (l_πi + l_πj) / 2
 	distance := float64(widths[facilityI]+widths[facilityJ]) / 2.0
 
-	// Druhá část vzorce: suma šířek všech zařízení MEZI pozicemi i a j
-	// Procházíme všechny pozice k, kde i < k < j
-	// range(i+1, j) v Pythonu odpovídá for k := i + 1; k < j; k++ v Go
-	for k := i + 1; k < j; k++ {
-		// Zjistíme, které zařízení je na pozici k
+	// Druhá část vzorce: suma šířek VŠECH zařízení včetně krajních (i ≤ k ≤ j)
+	// Σ(l_πk)
+	// !!! Toto je vzorec ze zadání. Správně by to mělo být i < k < j, ale zadání říká včetně krajních. !!!
+	for k := i; k <= j; k++ {
 		facilityK := permutation[k]
 		// Přičteme jeho šířku k celkové vzdálenosti
 		distance += float64(widths[facilityK])
@@ -163,18 +162,53 @@ func calculate_distance(permutation []int, widths []int, i int, j int) float64 {
 	return distance
 }
 
+// calculateCostIncrement vypočítá PŘÍRŮSTEK ceny při přidání nového zařízení
+// Toto je OPTIMALIZOVANÁ verze - místo přepočítání celé ceny (O(depth²))
+// spočítáme jen zvýšení ceny způsobené novým zařízením (O(depth))
+// Parametry:
+//   - perm: částečná permutace (jen prvních depth pozic je vyplněno)
+//   - depth: kolik pozic je už obsazeno
+//   - newFacility: zařízení, které chceme přidat na pozici depth
+//   - widths: šířky všech zařízení
+//   - costMatrix: matice vah přechodů
+//
+// Vrací: přírůstek ceny (kolik se přičte k currentCost)
+func calculateCostIncrement(perm []int, depth int, newFacility int,
+	widths []int, costMatrix [][]float64) float64 {
+
+	costIncrement := 0.0
+
+	// Dočasně přidáme nové zařízení na pozici depth pro výpočet vzdáleností
+	perm[depth] = newFacility
+
+	// Pro každé zařízení už v permutaci spočítáme cost s novým zařízením
+	for i := 0; i < depth; i++ {
+		facilityI := perm[i]
+
+		// Použijeme modularizovanou funkci calculate_distance
+		// Pro výpočet vzdálenosti mezi pozicí i a novou pozicí depth
+		distance := calculate_distance(perm, widths, i, depth)
+
+		// Přičteme cost: c_ij * distance
+		costIncrement += costMatrix[facilityI][newFacility] * distance
+	}
+
+	return costIncrement
+}
+
 func main() {
-	// Načteme data ze souboru
+	// Načteme data
 	widths, costMatrix := load_data()
 	if widths == nil || costMatrix == nil {
 		fmt.Println("Failed to load data.")
 		return
 	}
 
-	// Výpis načtených dat pro kontrolu
+	// výpis dat
 	fmt.Println("Widths:", widths)
 	fmt.Println("Cost Matrix:")
 	for _, row := range costMatrix {
 		fmt.Println(row)
 	}
+
 }
