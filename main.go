@@ -32,11 +32,11 @@ var (
 	totalPruned  atomic.Int64
 )
 
-// load_data načte data ze souboru Y-t_10.txt
+// load_data načte data ze souboru dataset2.txt
 // Vrací: pole šířek zařízení a matici vah přechodů mezi zařízeními
 func load_data() ([]int, [][]float64) {
 	// Uložíme si cestu k souboru do proměnné
-	var path string = "Y-t_10.txt"
+	var path string = "dataset2.txt"
 
 	// Z knihovny os funkce Open otevře soubor
 	file, err := os.Open(path)
@@ -133,17 +133,17 @@ func load_data() ([]int, [][]float64) {
 	return widths, matrix
 }
 
-// calculate_distance vypočítá vzdálenost mezi dvěma pozicemi v permutaci
+// calculateDistance vypočítá vzdálenost mezi dvěma pozicemi v permutaci
 // Vzorec POZMĚNĚNÝ DLE ZADÁNÍ: d(π_i, π_j) = (l_πi + l_πj)/2 + Σ(l_πk) pro i ≤ k ≤ j
-// POZOR: Toto je modifikovaný vzorec! Standardní SRFLP používá i < k < j
+// Toto je modifikovaný vzorec. Standardní SRFLP používá i < k < j
 // Parametry:
-//   - permutation: aktuální uspořádání zařízení
-//   - widths: šířky jednotlivých zařízení
+//   - permutation: aktuální uspořádání zařízení - např. [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+//   - widths: šířky jednotlivých zařízení - např. [4, 5, 3, 6, 2, 7, 4, 5, 3, 6]
 //   - i: index první pozice v permutaci
 //   - j: index druhé pozice v permutaci
 //
 // Vrací: vzdálenost mezi pozicemi i a j
-func calculate_distance(permutation []int, widths []int, i int, j int) float64 {
+func calculateDistance(permutation []int, widths []int, i int, j int) float64 {
 	// Zjistíme, která zařízení jsou na pozicích i a j
 	// permutation[i] je INDEX zařízení (0-9), ne jeho pozice
 	facilityI := permutation[i]
@@ -156,7 +156,7 @@ func calculate_distance(permutation []int, widths []int, i int, j int) float64 {
 	// Druhá část vzorce: suma šířek VŠECH zařízení včetně krajních (i ≤ k ≤ j)
 	// Σ(l_πk)
 	// !!! Toto je vzorec ze zadání. Správně by to mělo být i < k < j, ale zadání říká včetně krajních. !!!
-	for k := i; k <= j; k++ {
+	for k := i; k <= j; k++ { // normálně by to tedy balo k := i + 1; k < j; k++
 		facilityK := permutation[k]
 		// Přičteme jeho šířku k celkové vzdálenosti
 		distance += float64(widths[facilityK])
@@ -166,20 +166,33 @@ func calculate_distance(permutation []int, widths []int, i int, j int) float64 {
 }
 
 // calculateCostIncrement vypočítá PŘÍRŮSTEK ceny při přidání nového zařízení
+// Implementuje VNITŘNÍ část dvojitého vzorce:
+// f_SRFLP = Σ(i) Σ(j>i) [c_π[i],π[j] * d(π[i], π[j])]
+//
+//	^
+//	Pouze tato část pro pevné j=new
+//
+// Konkrétně počítá (pro všechna již umístěná zařízení):
+// increment = Σ(i=0 to depth-1) [c_π[i],π[new] * d(π[i], π[new])]
+//
+// Poznámka: Vnější cyklus (přes všechna j) je v branchAndBound()
+// Ten pak volá tuto funkci pro každé j, čímž se vytváří efektivní paralelní výpočet
+//
 // Toto je OPTIMALIZOVANÁ verze - místo přepočítání celé ceny (O(depth²))
-// spočítáme jen zvýšení ceny způsobené novým zařízením (O(depth))
+// spočítáme jen přírůstek zavedený novým zařízením (O(depth))
+//
 // Parametry:
-//   - perm: částečná permutace (jen prvních depth pozic je vyplněno)
-//   - depth: kolik pozic je už obsazeno
-//   - newFacility: zařízení, které chceme přidat na pozici depth
-//   - widths: šířky všech zařízení
-//   - costMatrix: matice vah přechodů
+//   - perm []int: částečná permutace (jen prvních <depth> pozic je vyplněno)
+//   - depth int: kolik pozic je už obsazeno
+//   - newFacility int: zařízení, které chceme přidat na pozici depth
+//   - widths []int: šířky všech zařízení
+//   - costMatrix [][]float64: matice vah přechodů
 //
 // Vrací: přírůstek ceny (kolik se přičte k currentCost)
 func calculateCostIncrement(perm []int, depth int, newFacility int,
 	widths []int, costMatrix [][]float64) float64 {
 
-	costIncrement := 0.0
+	costIncrement := 0.0 // Proměnná pro přírůstek ceny
 
 	// Dočasně přidáme nové zařízení na pozici depth pro výpočet vzdáleností
 	perm[depth] = newFacility
@@ -188,9 +201,9 @@ func calculateCostIncrement(perm []int, depth int, newFacility int,
 	for i := 0; i < depth; i++ {
 		facilityI := perm[i]
 
-		// Použijeme modularizovanou funkci calculate_distance
+		// Použijeme modularizovanou funkci calculateDistance
 		// Pro výpočet vzdálenosti mezi pozicí i a novou pozicí depth
-		distance := calculate_distance(perm, widths, i, depth)
+		distance := calculateDistance(perm, widths, i, depth)
 
 		// Přičteme cost: c_ij * distance
 		costIncrement += costMatrix[facilityI][newFacility] * distance
@@ -199,26 +212,45 @@ func calculateCostIncrement(perm []int, depth int, newFacility int,
 	return costIncrement
 }
 
-// atomicLoadFloat64 načte float64 hodnotu atomicky
+// atomicky: tak, že je to nepřerušitelná instrukce pro procesor
+// Funkce dělá to, že dostane ukazatel na uint64 (reprezentující float64 hodnotu)
+// a vrátí odpovídající float64 hodnotu atomicky.
 func atomicLoadFloat64(addr *uint64) float64 {
 	return math.Float64frombits(atomic.LoadUint64(addr))
 }
 
-// atomicStoreFloat64 uloží float64 hodnotu atomicky
+// Funkce dělá to, že dostane ukazatel na uint64 (reprezentující float64 hodnotu)
+// a uloží odpovídající float64 hodnotu do předané proměnné <val> atomicky
 func atomicStoreFloat64(addr *uint64, val float64) {
 	atomic.StoreUint64(addr, math.Float64bits(val))
 }
 
 // branchAndBound implementuje algoritmus Branch and Bound (backtracking)
-// ULTRA-OPTIMALIZOVANÁ verze
+//
+// # OPTIMALIZOVANÁ verze
+//
+// Argumenty:
+//   - perm []int - permutace, pole intů, předáno do funkce, pole je referenční typ, takže se touto funkcí bude přímo měnit dané pole
+//   - used uint16 - bitmapa použitých zařízení (1 = použité, 0 = nepoužité), bude to vypadat třeba: 0000000000001011 (binárně)
+//   - depth int - aktuální hloubka rekurze, počet již umístěných zařízení
+//   - currentCost float64 - aktuální cena pro danou částečnou permutaci
+//   - widths []int - šířky všech zařízení
+//   - costMatrix [][]float64 - matice vah přechodů, určuje náklady mezi zařízeními
+//   - n int - počet zařízení
+//   - localBest *float64 - ukazatel na nejlepší lokální cenu (pro pruning)
+//   - visited *int64 - ukazatel na počet navštívených uzlů (pro statistiky)
+//   - pruned *int64 - ukazatel na počet ořezaných uzlů (pro statistiky)
 func branchAndBound(perm []int, used uint16, depth int, currentCost float64,
 	widths []int, costMatrix [][]float64, n int,
 	localBest *float64, visited, pruned *int64) {
 
+	// branchAndBound se spouští rekurzivně, takže je třeba inkrementovat počet navštívených uzlů
 	*visited++
 
-	// BOUND - rychlý check
+	// BOUND - rychlý check, že aktuální cena už není lepší než nejlepší nalezená
 	if currentCost >= *localBest {
+		// Pokud prošlo, tak aktuální cena je větší než globální nejlepší cena
+		// Takže ořežeme tento uzel, protože nemá smysl pokračovat dál
 		*pruned++
 		return
 	}
@@ -289,7 +321,7 @@ func main() {
 	fmt.Println()
 
 	// Načteme data ze souboru
-	fmt.Println("Načítám data ze souboru Y-t_10.txt...")
+	fmt.Println("Načítám data ze souboru dataset2.txt...")
 	widths, matrix := load_data()
 
 	// Ověříme, že se data načetla správně
@@ -380,7 +412,7 @@ func main() {
 	atomicStoreFloat64(&bestCost, greedyCost)
 	bestPermutation = make([]int, n)
 	copy(bestPermutation, greedyPerm)
-	fmt.Printf("Greedy iniciální řešení: cena = %.0f, permutace = %v\n", greedyCost, greedyPerm)
+	fmt.Printf("Greedy iniciální řešení: cena = %.2f, permutace = %v\n", greedyCost, greedyPerm)
 
 	totalVisited.Store(0)
 	totalPruned.Store(0)
@@ -437,7 +469,7 @@ func main() {
 	fmt.Println()
 	fmt.Println("=== VÝSLEDKY ===")
 	finalCost := atomicLoadFloat64(&bestCost)
-	fmt.Printf("Nejlepší nalezená cena: %.0f\n", finalCost)
+	fmt.Printf("Nejlepší nalezená cena: %.2f\n", finalCost)
 	fmt.Printf("Nejlepší permutace: %v\n", bestPermutation)
 	fmt.Println()
 
