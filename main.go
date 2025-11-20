@@ -17,7 +17,7 @@ import (
 var (
 	// bestCost - atomická proměnná pro nejlepší cenu (používáme uint64 pro atomic operace s float64)
 	bestCost uint64
-	// bestPermutation - mutex chráněná
+	// bestPermutation - mutexem chráněná
 	bestPermutation []int
 	// Mutex (Mutual Exclusion) pro ochranu bestPermutation
 	// Je to vlastně obdoba zámku (lock)
@@ -155,8 +155,8 @@ func calculateDistance(permutation []int, widths []int, i int, j int) float64 {
 
 	// Druhá část vzorce: suma šířek VŠECH zařízení včetně krajních (i ≤ k ≤ j)
 	// Σ(l_πk)
-	// !!! Toto je vzorec ze zadání. Správně by to mělo být i < k < j, ale zadání říká včetně krajních. !!!
-	for k := i; k <= j; k++ { // normálně by to tedy balo k := i + 1; k < j; k++
+	// Toto je vzorec ze zadání. Správně by to mělo být i < k < j, ale zadání říká včetně krajních.
+	for k := i; k <= j; k++ { // normálně by to tedy bylo k := i + 1; k < j; k++
 		facilityK := permutation[k]
 		// Přičteme jeho šířku k celkové vzdálenosti
 		distance += float64(widths[facilityK])
@@ -197,11 +197,12 @@ func calculateCostIncrement(perm []int, depth int, newFacility int,
 	// Dočasně přidáme nové zařízení na pozici depth pro výpočet vzdáleností
 	perm[depth] = newFacility
 
+	// Taže pokud by byla depth = 3, tento cyklus bude počítat jen pro i = 0, 1, 2, zbytek permutace je ignorován
 	// Pro každé zařízení už v permutaci spočítáme cost s novým zařízením
 	for i := 0; i < depth; i++ {
 		facilityI := perm[i]
 
-		// Použijeme modularizovanou funkci calculateDistance
+		// Použijeme funkci calculateDistance
 		// Pro výpočet vzdálenosti mezi pozicí i a novou pozicí depth
 		distance := calculateDistance(perm, widths, i, depth)
 
@@ -239,7 +240,7 @@ func atomicStoreFloat64(addr *uint64, val float64) {
 //   - n int - počet zařízení
 //   - localBest *float64 - ukazatel na nejlepší lokální cenu (pro pruning)
 //   - visited *int64 - ukazatel na počet navštívených uzlů (pro statistiky)
-//   - pruned *int64 - ukazatel na počet ořezaných uzlů (pro statistiky)
+//   - pruned *int64 - ukazatel na počet ořezaných uzlů (pro statistiky), (ořezané = pruning)
 func branchAndBound(perm []int, used uint16, depth int, currentCost float64,
 	widths []int, costMatrix [][]float64, n int,
 	localBest *float64, visited, pruned *int64) {
@@ -250,35 +251,45 @@ func branchAndBound(perm []int, used uint16, depth int, currentCost float64,
 	// BOUND - rychlý check, že aktuální cena už není lepší než nejlepší nalezená
 	if currentCost >= *localBest {
 		// Pokud prošlo, tak aktuální cena je větší než globální nejlepší cena
-		// Takže ořežeme tento uzel, protože nemá smysl pokračovat dál
+		// Takže ořežeme tento uzel, protože nemá smysl pokračovat dál - už prostě není šance, že by cena byla menší (lepší)
 		*pruned++
 		return
 	}
 
 	// Kompletní permutace
-	if depth == n {
+	if depth == n { // Pokud je depth roven počtu zařízení, znamená to, že permutace je plná (kompletní)
 		// Pokud jsme lepší, update atomicky
 		for {
-			current := atomicLoadFloat64(&bestCost)
-			if currentCost >= current {
+			// Vysvětlení proč loadujeme do floatu hodnotu unsignedInt64:
+			// bestCost je uložen jako uint64 (protože atomic operace v Go nepodporují float64 přímo)
+			// ale cost musí být float, takže je třeba převést na float touto atomickou funkcí - nedojde k deadlocku
+			current := atomicLoadFloat64(&bestCost) // takže v current je hodnota aktuálně nejlepší ceny jako float64
+			if currentCost >= current {             // Pokud je aktuální cena větší nebo rovna nejlepší ceně, breakneme cyklus
 				break
 			}
-			if atomic.CompareAndSwapUint64(&bestCost,
-				math.Float64bits(current),
-				math.Float64bits(currentCost)) {
-				*localBest = currentCost
-				bestMutex.Lock()
-				bestPermutation = make([]int, n)
-				copy(bestPermutation, perm[:n])
-				bestMutex.Unlock()
-				// Odstraněn fmt.Printf - zpomaluje výkon!
-				break
+
+			// Pokud se nám podaří atomicky aktualizovat nejlepší cenu, aktualizujeme nejlepší permutaci
+			// &bestCost - ukazatel na globální proměnnou nejlepší ceny, pokud se porovnání povede, funkce zapíšu novou hodnotu na tuto adresu
+			// math.Float64bits(current) - očekávaná stará hodnota (hodnota, kterou očekáváme, že je v *bestCost)
+			// math.Float64bits(currentCost) - nová hodnota, kterou chceme zapsat, pokud se porovnání povede
+			// Funkce vrací true, pokud se hodnota aktualizovala, false pokud ne (jiná goroutina mezitím změnila hodnotu)
+			if atomic.CompareAndSwapUint64(&bestCost, math.Float64bits(current), math.Float64bits(currentCost)) {
+				// if prošel - na bestCost jsme úspěšně zapsali currentCost - globální nejlepší cenu jsme úspěšně aktualizovali
+				*localBest = currentCost         // aktualizujeme i lokální nejlepší cenu
+				bestMutex.Lock()                 // zamkneme mutex
+				bestPermutation = make([]int, n) // vytvoříme nové pole pro nejlepší permutaci
+				copy(bestPermutation, perm[:n])  // zkopírujeme aktuální permutaci do nejlepší permutace, slice [:n] znamená celý obsah pole
+				bestMutex.Unlock()               // odemkneme mutex
+				break                            // konec cyklu - úspěšně jsme aktualizovali nejlepší cenu a permutaci
 			}
 		}
-		return
+		return // konec funkce - už nemáme co dál dělat
 	}
 
-	// Občas refresh (bitwise AND je rychlejší než modulo)
+	// předchozí if neprošel - takže permutace není kompletní, a funkce neskončila
+
+	// Pokud je počítadlo navštívených uzlů na určité hodnotě, aktualizujeme lokální nejlepší cenu z globální
+	// Toto děláme proto, že jiná goroutina mohla najít mezitím lepší řešení, takže potřebujeme aby i ostatní goroutiny tuto informaci měly aktuální
 	if *visited&0xFFF == 0 { // každých 4096 uzlů (méně často = rychlejší)
 		global := atomicLoadFloat64(&bestCost)
 		if global < *localBest {
@@ -288,28 +299,41 @@ func branchAndBound(perm []int, used uint16, depth int, currentCost float64,
 
 	// BRANCH - zkusíme všechna dosud nepoužitá zařízení
 	for facility := 0; facility < n; facility++ {
-		// Rychlý check bitmapy - je toto zařízení už použité?
+		// Rychlý check bitmapy - jestli je toto zařízení už použité
+		// Co tenhle if přesně dělá:
+		// used je unsigned integer, kde každý bit reprezentuje jedno zařízení (0-15 pro uint16)
+		// znak "&" za used znamená bitový AND - porovnáváme bity
+		// (1 << facility) znamená "1 posunuté doleva o facility pozic" - tedy bitová maska pro konkrétní zařízení
+		// Například pokud facility = 3, pak (1 << 3) je 0000000000001000 (binárně)
+		// Pokud je bit na pozici facility v used nastaven (1), znamená to, že zařízení je již použité
+		// Pokud je bit 0, zařízení není použité
+		// Takže pokud je výsledek AND operace různý od nuly, znamená to, že zařízení je již použité
 		if used&(1<<facility) != 0 {
 			continue
 		}
 
 		// Vypočítáme přírůstek ceny při přidání tohoto zařízení
-		// Používáme optimalizovanou funkci - O(depth) místo O(depth²)
+		// Používáme optimalizovanou funkci (výše definovanou) - O(depth) místo O(depth²)
 		costIncrement := calculateCostIncrement(perm, depth, facility, widths, costMatrix)
 		newCost := currentCost + costIncrement
 
-		// Pruning před rekurzí
+		// Pruning před rekurzí - osekáme větve, které nemají šanci být lepší než nejlepší dosud nalezené řešení
+		// Pokud je nová cena větší nebo rovna nejlepší lokální ceně - je horší, ořežeme tuto větev
 		if newCost >= *localBest {
-			*pruned++
-			continue
+			*pruned++ // if prošel, přičteme k počtu ořezaných uzlů
+			continue  // a tuto větem ořežeme tím, že pro ni nebudeme volat rekurzi
 		}
 
-		// In-place update
+		// In-place update:
+		// Přidáme zařízení do permutace na pozici depth
+		// perm je lokální buffer pro každou goroutinu, takže je bezpečné ho měnit přímo
 		perm[depth] = facility
 
-		// Rekurze
-		branchAndBound(perm, used|(1<<facility), depth+1, newCost,
-			widths, costMatrix, n, localBest, visited, pruned)
+		// Rekurze - znovu voláme tuto funkci
+		// všechny argumenty zůstávají stejné, jen:
+		// used|(1<<facility) - aktualizujeme bitmapu použitých zařízení pomocí OR ("|")
+		// depth+1 - zvyšujeme hloubku o 1 - zanoříme se o 1
+		branchAndBound(perm, used|(1<<facility), depth+1, newCost, widths, costMatrix, n, localBest, visited, pruned)
 	}
 }
 
@@ -341,14 +365,18 @@ func main() {
 
 	// Inicializace
 	// OPTIMALIZACE: Nejprve najdeme greedy řešení jako počáteční upper bound
-	// Toto dramaticky zvýší pruning hned od začátku!
+	// Toto dramaticky zvýší pruning hned od začátku.
 
 	// Spočítáme celkovou váhu každého zařízení (součet všech costs)
+	// Pomocná strujtura pro jedno zařízení a jeho váhu
 	type facilityWeight struct {
 		id     int
 		weight float64
 	}
+
+	// tímto make vytvoříme pole struktur facilityWeight délky n
 	facilities := make([]facilityWeight, n)
+	// teď už jen projdeme matici a spočítáme váhy
 	for i := 0; i < n; i++ {
 		weight := 0.0
 		for j := 0; j < n; j++ {
@@ -360,27 +388,33 @@ func main() {
 	}
 
 	// Seřadíme podle váhy (nejvyšší první)
+	// knihovna sort, funkce Slice bere pole zařízení a funkci, která definuje pořadí - tím seřadí sestupně podle váhy
 	sort.Slice(facilities, func(i, j int) bool {
 		return facilities[i].weight > facilities[j].weight
 	})
 
-	greedyPerm := make([]int, n)
-	greedyUsed := make([]bool, n)
+	// první si inicializujeme proměnné pro první, greedy řešení
+	greedyPerm := make([]int, n)     // Permutace
+	greedyUsed := make([]bool, n)    // Která zařízení jsou už použita
 	greedyPerm[0] = facilities[0].id // Začneme s nejvyšší váhou
-	greedyUsed[greedyPerm[0]] = true
-	greedyCost := 0.0
+	greedyUsed[greedyPerm[0]] = true // nastavíme jako použitou
+	greedyCost := 0.0                // Cena greedy řešení
 
 	// Greedy: vždy přidáme zařízení s nejnižším přírůstkem
+	// Co dělá tenhle cyklus: Pro každou pozici v permutaci (od 1 do n-1) vybereme zařízení, které přidá nejmenší přírůstek k celkové ceně
 	for depth := 1; depth < n; depth++ {
+		// Inicializace (facility: -1, incement: +INFINITY)
 		bestFacility := -1
 		bestIncrement := math.Inf(1)
 
+		// Pro každé zařízení, které ještě není použité
 		for _, fw := range facilities {
+			// Pokud je použíté (v greedyUsed), if projde a iteraci (zařízení) přeskočíme
 			if greedyUsed[fw.id] {
 				continue
 			}
 
-			// Spočítáme přírůstek pomocí modifikovaného vzorce (i ≤ k ≤ j)
+			// Spočítáme přírůstek pomocí vzorce (i ≤ k ≤ j)
 			increment := 0.0
 			for i := 0; i < depth; i++ {
 				facilityI := greedyPerm[i]
@@ -388,9 +422,11 @@ func main() {
 				distance := float64(widths[facilityI]+widths[fw.id]) / 2.0
 				// Druhá část: suma VŠECH šířek včetně krajních (i ≤ k ≤ depth)
 				for k := i; k <= depth; k++ {
+					// Pokud je k menší než depth, znamená, že je v poli před novým zařízením
 					if k < depth {
+						// takže k distance přičteme šířku zařízení z dané greedy permutace na pozici k
 						distance += float64(widths[greedyPerm[k]])
-					} else {
+					} else { // Pokud k == depth, je to nové zařízení
 						distance += float64(widths[fw.id])
 					}
 				}
