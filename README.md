@@ -2,11 +2,11 @@
 
 Tento repozitář obsahuje řešení Projektu 1 z předmětu **Paralelní Algoritmy 1** (VŠB-TUO) implementované v jazyce **Go**.
 
-**[📋 Oficiální zadání projektu](https://homel.vsb.cz/~kro080/PAI-2025/U1/)**
+**[ Oficiální zadání projektu](https://homel.vsb.cz/~kro080/PAI-2025/U1/)**
 
 ---
 
-## 📖 O problému SRFLP
+##  O problému SRFLP
 
 **Single Row Facility Layout Problem** (problém rozložení zařízení v jedné řadě) je optimalizační problém zaměřený na hledání nejlepšího lineárního uspořádání zařízení s cílem minimalizovat celkové náklady na přesuny mezi nimi.
 
@@ -18,7 +18,7 @@ Představte si **robotické rameno** obklopené dopravními pásy, ze kterých o
 
 ---
 
-## 🔢 Matematická formulace
+##  Matematická formulace
 
 Pro množinu $n$ zařízení $F = \{1, 2, ..., n\}$ se známými **šířkami** $L = (l_1, l_2, ..., l_n)$ a **maticí vah** přechodů $C = \{c_{ij}\} \in \mathbb{R}^{n \times n}$ hledáme permutaci $\pi = (\pi_1, \pi_2, ..., \pi_n)$, která minimalizuje:
 
@@ -28,7 +28,7 @@ Kde vzdálenost mezi zařízeními je definována jako:
 
 $$d(\pi_i, \pi_j) = \frac{l_{\pi_i} + l_{\pi_j}}{2} + \sum_{i < k < j} l_{\pi_k}$$
 
-### ⚠️ Poznámka k vzorci vzdálenosti
+###  Poznámka k vzorci vzdálenosti
 
 V **oficiálním zadání projektu** je vzorec pro výpočet vzdálenosti **mírně změněn** oproti standardní definici SRFLP:
 
@@ -39,7 +39,7 @@ Rozdíl je v rozsahu sumy - místo `i < k < j` (pouze zařízení mezi) se použ
 
 ---
 
-## 🚀 Řešení
+##  Řešení
 
 ### Algoritmus: Branch and Bound (optimalizovaný)
 
@@ -54,18 +54,18 @@ Program implementuje **vysoce optimalizovaný paralelní Branch and Bound algori
 
 #### 2. **Klíčové optimalizace**
 
-✅ **Bitmapové masky** (`uint16`) - rychlé sledování použitých zařízení bez pole booleanů  
-✅ **Atomické operace** - `bestCost` sdílená atomicky mezi vlákny (bez mutexu)  
-✅ **Lokální best tracking** - každé vlákno má svůj `localBest` pro rychlejší pruning  
-✅ **Inkrementální výpočet** - `calculateCostIncrement()` místo přepočítání celé ceny (O(depth) vs O(depth²))  
-✅ **Pre-alokované buffery** - permutační pole alokované jednou, ne při každé rekurzi  
-✅ **Periodický refresh** - lokální best se aktualizuje z global každých 4096 uzlů (bitwise AND místo modulo)  
-✅ **Paralelizace** - každé vlákno začíná s jiným zařízením z greedy pořadí  
-✅ **Statistiky** - agregace lokálních počítadel na konci (minimální synchronizace)
+ **Bitmapové masky** (`uint16`) - rychlé sledování použitých zařízení bez pole booleanů  
+ **Atomické operace** - `bestCost` sdílená atomicky mezi vlákny (bez mutexu)  
+ **Lokální best tracking** - každé vlákno má svůj `localBest` pro rychlejší pruning  
+ **Inkrementální výpočet** - `calculateCostIncrement()` místo přepočítání celé ceny (O(depth) vs O(depth²))  
+ **Pre-alokované buffery** - permutační pole alokované jednou, ne při každé rekurzi  
+ **Periodický refresh** - lokální best se aktualizuje z global každých 4096 uzlů (bitwise AND místo modulo)  
+ **Paralelizace** - každé vlákno začíná s jiným zařízením z greedy pořadí  
+ **Statistiky** - agregace lokálních počítadel na konci (minimální synchronizace)
 
 ---
 
-## 📁 Vstupní data
+##  Vstupní data
 
 Repozitář obsahuje testovací dataset **`Y-t_10.txt`** s následující strukturou:
 
@@ -85,7 +85,7 @@ Repozitář obsahuje testovací dataset **`Y-t_10.txt`** s následující strukt
 
 ---
 
-## 💻 Spuštění programu
+##  Spuštění programu
 
 ### Požadavky
 
@@ -131,7 +131,7 @@ Počet goroutines: 10
 
 ---
 
-## 📊 Výsledky
+##  Výsledky
 
 Pro testovací instanci `Y-t_10.txt` (10 zařízení):
 
@@ -147,7 +147,7 @@ Pro testovací instanci `Y-t_10.txt` (10 zařízení):
 
 ---
 
-## 🏗️ Struktura kódu
+##  Struktura kódu
 
 ```
 main.go
